@@ -12,6 +12,23 @@ from keras.utils import multi_gpu_model
 import shutil
 from numba import cuda
 from os import listdir
+from os.path import isfile, join
+import torch
+import torch.nn as nn
+import torchvision.models as models
+from torchvision.transforms import Normalize
+from sklearn import metrics
+
+gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+class MyResNeXt(models.resnet.ResNet):
+    def __init__(self, training=True):
+        super(MyResNeXt, self).__init__(block=models.resnet.Bottleneck,
+                                        layers=[3, 4, 6, 3],
+                                        groups=32,
+                                        width_per_group=4)
+        self.fc = nn.Linear(2048, 1)
 
 
 class YOLO(object):
@@ -141,90 +158,248 @@ class YOLO(object):
 
 
 class GenerateFaceCrops:
-    def __init__(self,video_directory, sample_rate):
+    def __init__(self, video_directory, sample_rate):
         self.video_directory = video_directory
         self.sample_rate = sample_rate
-        self.skip_rate = 300//sample_rate
 
     def face_crops(self):
-        os.mkdir("FaceCrops")
-        from os.path import isfile, join
+        try:
+            os.mkdir("FaceCrops")
+        except Exception as e:
+            print(e)
         videos = [f for f in listdir(self.video_directory) if isfile(join(self.video_directory, f))]
-        video_captures = []
-        first_frame_faces = []
-        first_frame_vids = []
-
         yolo_object = YOLO()
         yolo_object.load_models()
         for v in videos:
-            video_path = self.video_directory+"/"+v
-            video_name = video_path.split("/")[-1].split(".")[0]
-            os.mkdir("FaceCrops/" + video_name)
-            vid = cv2.VideoCapture(video_path)
-            ret, frame = vid.read()
-            first_frame_vids.append(frame)
-            person_boxes = yolo_object.detect_video(frame)
-            video_captures.append(vid)
-            first_frame_faces.append(person_boxes)
-            for i in range(0, len(person_boxes)):
-                os.mkdir("FaceCrops/" + video_name + "/" + "Person" + str(i + 1))
-            person_no = 1
-            for bbox in person_boxes:
-                x, y, w, h = int(bbox[2]), int(bbox[0]), int(bbox[3] - bbox[2]), int(bbox[1] - bbox[0])
-                img = frame[y:y + h, x:x + w]
-                cv2.imwrite("FaceCrops/" + video_name + "/" + "Person" + str(person_no) + "/" + "Frame0.jpg", img)
-                person_no += 1
-        cuda.close()
-        for index, video_name in enumerate(videos):
-            print("Video Number is :- ", index+1)
-            frame = first_frame_vids.pop(0)
-            vid = video_captures.pop(0)
-            current_boxes = first_frame_faces.pop(0)
-
-            video_name = video_name.split(".")[0]
-            multiTracker = cv2.MultiTracker_create()
-
-            for i in range(0, len(current_boxes)):
-                bbox = current_boxes[i]
-                x, y, w, h = int(bbox[2]), int(bbox[0]), int(bbox[3] - bbox[2]), int(bbox[1] - bbox[0])
-                bbox = [x, y, w, h]
-                multiTracker.add(cv2.TrackerKCF_create(), frame, tuple(bbox))
-            frame_number = 1
-            total_frames = 1
-            while vid.isOpened():
+            try:
+                video_path = self.video_directory+"/"+v
+                video_name = video_path.split("/")[-1].split(".")[0]
+                os.mkdir("FaceCrops/" + video_name)
+                print(video_name)
+                vid = cv2.VideoCapture(video_path)
                 ret, frame = vid.read()
-                if not ret:
-                    break
-                ret, boxes = multiTracker.update(frame)
-                if total_frames==self.sample_rate:
-                    break
-                if frame_number%self.skip_rate!=0:
-                    frame_number +=1
-                    continue
-                total_frames+=1
+                person_boxes = yolo_object.detect_video(frame)
+                for i in range(0, len(person_boxes)):
+                    os.mkdir("FaceCrops/" + video_name + "/" + "Person" + str(i + 1))
                 person_no = 1
-                for i, newbox in enumerate(boxes):
-                    x, y, w, h = newbox
-                    img = frame[int(y):int(y + h), int(x):int(x + w)]
-                    cv2.imwrite("FaceCrops/" + video_name + "/" + "Person" + str(person_no) + "/" + "Frame" + str(frame_number) + ".jpg", img)
+                for bbox in person_boxes:
+                    x, y, w, h = int(bbox[2]), int(bbox[0]), int(bbox[3] - bbox[2]), int(bbox[1] - bbox[0])
+                    img = frame[y:y + h, x:x + w]
+                    cv2.imwrite("FaceCrops/" + video_name + "/" + "Person" + str(person_no) + "/" + "Frame0.jpg", img)
                     person_no += 1
-                if cv2.waitKey(1) & 0xFF == 27:
-                    break
-                frame_number += 1
-                print("Current Video :-", index+1, "Frame No.:- ", frame_number)
+                multiTracker = cv2.MultiTracker_create()
+
+                for i in range(0, len(person_boxes)):
+                    bbox = person_boxes[i]
+                    x, y, w, h = int(bbox[2]), int(bbox[0]), int(bbox[3] - bbox[2]), int(bbox[1] - bbox[0])
+                    bbox = [x, y, w, h]
+                    multiTracker.add(cv2.TrackerKCF_create(), frame, tuple(bbox))
+                frame_number = 1
+                total_frames = 1
+                while vid.isOpened():
+                    skip_rate = vid.get(cv2.CAP_PROP_FRAME_COUNT)//self.sample_rate
+                    ret, frame = vid.read()
+                    if not ret:
+                        break
+                    ret, boxes = multiTracker.update(frame)
+                    if total_frames == self.sample_rate:
+                        break
+                    if frame_number % skip_rate != 0:
+                        frame_number += 1
+                        continue
+                    total_frames += 1
+                    person_no = 1
+                    for i, newbox in enumerate(boxes):
+                        x, y, w, h = newbox
+                        img = frame[int(y):int(y + h), int(x):int(x + w)]
+                        cv2.imwrite("FaceCrops/" + video_name + "/" + "Person" + str(person_no) + "/" + "Frame" + str(frame_number) + ".jpg", img)
+                        person_no += 1
+                    if cv2.waitKey(1) & 0xFF == 27:
+                        break
+                    frame_number += 1
+            except Exception as e:
+                print(e)
+                pass
+        cuda.close()
+
+class Utils:
+    def __init__(self, frames_per_video):
+        self.frames_per_video = frames_per_video
+        self.input_size = 150
+
+    """
+    Function :- isotropically_resize_image
+    Resize the face image as per the input size of the inception model.
+    Input :
+           img :- Face Crops generated from the main frame of the video.
+           size :- Width/Height of the image. (Image is supposed to be a square)
+    Returns :
+            resized :- Resized image with it's higher dimension equal to size.
+    """
+
+    def isotropically_resize_image(self, img, size, resample=cv2.INTER_AREA):
+        h, w = img.shape[:2]
+        if w > h:
+            h = h * size // w
+            w = size
+        else:
+            w = w * size // h
+            h = size
+
+        resized = cv2.resize(img, (w, h), interpolation=resample)
+        return resized
+
+    """
+    Function :- make_square_image
+    Add borders to the image in order to change the shape of image to a square.
+    Input :
+           img :- Resized face crops from the isotropically_resize_image function.
+    Returns :
+            square_image :- Square image with a border of height (size-h) and width (size-w). 
+    """
+
+    def make_square_image(self, img):
+        h, w = img.shape[:2]
+        size = max(h, w)
+        t = 0
+        b = size - h
+        l = 0
+        r = size - w
+        return cv2.copyMakeBorder(img, t, b, l, r, cv2.BORDER_CONSTANT, value=0)
+
+
+    """
+    Function :- find_number_of_person
+    Return the number of person id found after completion of detection and tracking algotihms.
+    Input :
+           video_face_path :- Path of the folder of a specific video where different person 
+                              ID are stored.
+    Returns :
+            arr :- Number of different people in the entire video. 
+    """
+
+    def find_number_of_person(self, video_face_path):
+        arr = os.listdir(video_face_path)
+        return len(arr)
+
+    def generate_image_tensor(self, video_face_path):
+        person_count = self.find_number_of_person(video_face_path)
+        person_x = []
+        for i in range(1,person_count+1):
+            mypath = video_face_path + "/Person" + str(i)
+            onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
+            x = np.zeros((self.frames_per_video, self.input_size, self.input_size, 3), dtype=np.uint8)
+            n = 0
+            for f in onlyfiles:
+                files = mypath + "/" + f
+                img = cv2.imread(files)
+                frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                resized_face = self.isotropically_resize_image(frame, self.input_size)
+                resized_face = self.make_square_image(resized_face)
+                x[n] = resized_face
+                n += 1
+            person_x.append(x)
+        return person_x
 
 
 class RunXceptionNet:
     pass
 
+
 class RunResNext:
-    pass
+    def __init__(self, video_directory_path, frames_per_video):
+        self.utils = Utils(frames_per_video)
+        self.mean = [0.485, 0.456, 0.406]
+        self.std = [0.229, 0.224, 0.225]
+        self.normalize_transform = Normalize(self.mean, self.std)
+        self.model = self.load_model()
+        self.video_directory_path = video_directory_path
+        self.frames_per_video = frames_per_video
+
+    """
+    Function :- load_model
+    This function is called in the when the object of RunResNext is created. Inception ResNet model is
+    loaded using the function.
+    Input :
+           None
+    Returns :
+            model :- Instance of the loaded model.
+    """
+    def load_model(self):
+        checkpoint = torch.load("resnext.pth", map_location=gpu)
+        model = MyResNeXt().to(gpu)
+        model.load_state_dict(checkpoint)
+        _ = model.eval()
+        del checkpoint
+        return model
+
+    """
+    Function :- predict
+    This function is called in the after the model has been loaded. It is used predict the probability
+    score of each video present in the self.video_directory_path.
+    Input :
+           None
+    Returns :
+            probability_scores :- Dictionary with video names as their keys and there predicted 
+                                  probability score as the value of that specific key.  
+    """
+    def predict(self):
+        arr = os.listdir(self.video_directory_path)
+        probability_scores = {}
+        for video in arr:
+            video_path = self.video_directory_path+"/"+video
+            face_tensor = self.utils.generate_image_tensor(video_path)
+            y_person = []
+            for i in range(len(face_tensor)):
+                x = face_tensor[i]
+                x = torch.tensor(x, device=gpu).float()
+                x = x.permute((0, 3, 1, 2))
+                for i in range(len(x)):
+                    x[i] = self.normalize_transform(x[i] / 255.)
+                with torch.no_grad():
+                    y_pred = self.model(x)
+                    y_pred = torch.sigmoid(y_pred.squeeze())
+                    y_person.append(y_pred[:self.frames_per_video].mean().item())
+            probability_scores[video] = max(y_person)
+            print(video, ":-", probability_scores[video])
+        return probability_scores
+
+    """
+    Function :- generate_report
+    This function is called in the after the predicted scores of every video in the directory has been
+    generated. It is mainly used to generate confusion matrix, classification report and accuracy.
+    Input :
+            probability_scores :- Dictionary with video names as their keys and there predicted 
+                                  probability score as the value of that specific key.
+            threshold :- Real value in between 0 and 1. If probability is more than threshold, then 
+                         we will consider video as fake.
+    Returns :
+            probability_scores :- Dictionary with video names as their keys and there predicted 
+            probability score as the value of that specific key.  
+    """
+
+    def generate_report(self, probability_scores, threshold):
+        y_real = []
+        y_pred = []
+        for keys in probability_scores.keys():
+            label = int(keys.split("_")[-1])
+            y_real.append(label)
+            if probability_scores[keys] > threshold:
+                y_pred.append(1)
+            else:
+                y_pred.append(0)
+        print(metrics.confusion_matrix(y_real, y_pred))
+        print(metrics.accuracy_score(y_real, y_pred))
+        print(metrics.classification_report(y_real, y_pred))
 
 
 if __name__ == "__main__":
+    #video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/check"
     frames_per_video = 30
-
-    video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/check"
-    face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
-    face_crop_object.face_crops()
+    #face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
+    # face_crop_object.face_crops()
+    video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops"
+    resnext = RunResNext(video_directory, frames_per_video)
+    scores = resnext.predict()
+    resnext.generate_report(scores, 0.4)
     # shutil.rmtree("/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops")
