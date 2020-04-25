@@ -1,0 +1,10 @@
+numpy==1.18.3
+torch==1.1.0
+tensorflow==1.8.0
+torchvision==0.3.0
+opencv-contrib-python==4.2.0.34
+opencv-python==4.2.0.34
+numba==0.42.0
+keras==2.2.5
+efficientnet==1.1.0
+h5py==2.10.0
