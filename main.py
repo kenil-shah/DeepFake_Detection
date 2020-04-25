@@ -2,14 +2,19 @@ import colorsys
 import cv2
 import numpy as np
 from keras import backend as K
-from keras.models import load_model
-from keras.layers import Input
+from keras.preprocessing.image import ImageDataGenerator
+from keras.preprocessing import image
+from keras.models import load_model,Model, Sequential
+from keras.layers import Input, Dropout, Flatten, Dense,Conv2D, MaxPool2D, GlobalMaxPooling2D,Activation
+from keras import optimizers
 from PIL import Image
 from yolo3.model import yolo_eval, yolo_body, tiny_yolo_body
 from yolo3.utils import letterbox_image
 import os
+import pandas as pd
 from keras.utils import multi_gpu_model
 import shutil
+import time
 from numba import cuda
 from os import listdir
 from os.path import isfile, join
@@ -18,6 +23,7 @@ import torch.nn as nn
 import torchvision.models as models
 from torchvision.transforms import Normalize
 from sklearn import metrics
+from efficientnet.keras import EfficientNetB5
 
 gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -226,6 +232,7 @@ class Utils:
     def __init__(self, frames_per_video):
         self.frames_per_video = frames_per_video
         self.input_size = 150
+        self.input_size2 = 224
 
     """
     Function :- isotropically_resize_image
@@ -301,9 +308,88 @@ class Utils:
             person_x.append(x)
         return person_x
 
+    def generate_image_tensor2(self,video_face_path):
+        person_count = self.find_number_of_person(video_face_path)
+        person_x = []
+        for i in range(1, person_count+1):
+            mypath = video_face_path + "/Person" + str(i)
+            onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
+            x = np.zeros((self.frames_per_video, self.input_size2, self.input_size2, 3), dtype=np.uint8)
+            n = 0
+            for f in onlyfiles:
+                files = mypath + "/" + f
+                img = image.load_img(files, target_size=(224, 224))
+                img_tensor = image.img_to_array(img)
+                img_tensor /= 255.
+                x[n] = img_tensor
+                n += 1
+            person_x.append(x)
+        return person_x
+
 
 class RunXceptionNet:
-    pass
+    def __init__(self, video_directory_path, frames_per_video):
+        self.utils = Utils(frames_per_video)
+        self.model = self.load_model()
+        self.video_directory_path = video_directory_path
+        self.frames_per_video = frames_per_video
+
+
+    def load_model(self):
+        base_model = EfficientNetB5(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+        x = base_model.output
+        x = GlobalMaxPooling2D()(x)
+        x = Dense(512)(x)
+        x = Dropout(0.1)(x)
+        x = Activation('relu')(x)
+        x = Dense(64)(x)
+        x = Dropout(0.1)(x)
+        x = Activation('relu')(x)
+        predictions = Dense(1, activation='sigmoid')(x)
+        model = Model(inputs=base_model.input, outputs=predictions)
+        model.compile(loss="binary_crossentropy", optimizer=optimizers.Adam(lr=0.001), metrics=['accuracy'])
+        model.load_weights("EFB5DeepFakes.h5")
+        return model
+    def predict(self):
+        model = self.load_model()
+        print("Model has been loaded")
+        arr = os.listdir(self.video_directory_path)
+        probability_scores = {}
+        test_datagen = ImageDataGenerator(rescale=1. / 255)
+        for video in arr:
+            start =time.time()
+            val_set_dir = self.video_directory_path+"/"+video
+            person_count = len(os.listdir(val_set_dir))
+
+            test_generator = test_datagen.flow_from_directory(val_set_dir,
+                                                              target_size=(224, 224),
+                                                              batch_size=10, class_mode='binary',
+                                                              color_mode='rgb', shuffle=False)
+            test_generator.reset()
+            predictions = model.predict_generator(test_generator, steps=test_generator.samples//10)
+            per_person = len(predictions)//person_count
+            y_person = []
+            for i in range(person_count):
+                y_person.append(predictions[i*per_person:i*per_person + per_person].mean().item())
+            probability_scores[video] = max(y_person)
+            end = time.time()
+            print(video, ":-", probability_scores[video], "Time Taken :-", end-start)
+
+        return probability_scores
+
+    def generate_report(self, probability_scores, threshold):
+        y_real = []
+        y_pred = []
+        for keys in probability_scores.keys():
+            label = int(keys.split("_")[-1])
+            y_real.append(label)
+            if probability_scores[keys] > threshold:
+                y_pred.append(1)
+            else:
+                y_pred.append(0)
+        print(metrics.confusion_matrix(y_real, y_pred))
+        print(metrics.accuracy_score(y_real, y_pred))
+        print(metrics.classification_report(y_real, y_pred))
 
 
 class RunResNext:
@@ -394,12 +480,24 @@ class RunResNext:
 
 
 if __name__ == "__main__":
+
     #video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/check"
     frames_per_video = 30
-    #face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
+    # face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
     # face_crop_object.face_crops()
+
     video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops"
+    '''
     resnext = RunResNext(video_directory, frames_per_video)
     scores = resnext.predict()
     resnext.generate_report(scores, 0.4)
+    start = time.time()
+    '''
+    
+    '''
+    EfficientNet = RunXceptionNet(video_directory, frames_per_video)
+    scores = EfficientNet.predict()
+    EfficientNet.generate_report(scores, 0.4)
+    '''
+    # print(scores)
     # shutil.rmtree("/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops")
