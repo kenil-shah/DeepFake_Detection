@@ -24,6 +24,8 @@ import torchvision.models as models
 from torchvision.transforms import Normalize
 from sklearn import metrics
 from efficientnet.keras import EfficientNetB5
+from keras.applications.xception import Xception, preprocess_input
+import json
 
 gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -228,6 +230,7 @@ class GenerateFaceCrops:
                 pass
         cuda.close()
 
+
 class Utils:
     def __init__(self, frames_per_video):
         self.frames_per_video = frames_per_video
@@ -327,15 +330,114 @@ class Utils:
         return person_x
 
 
-class RunXceptionNet:
+class results:
+
+    def find_best_threshold(self, probability_scores):
+        accuracy = []
+        threshold = 0.0
+        threshold_graph = []
+        while threshold < 1:
+            y_pred = []
+            y_real = []
+            for keys in probability_scores.keys():
+                label = int(keys.split("_")[-1])
+                y_real.append(label)
+                if probability_scores[keys] > threshold:
+                    y_pred.append(1)
+                else:
+                    y_pred.append(0)
+            threshold_graph.append(threshold)
+            accuracy.append(metrics.accuracy_score(y_real, y_pred))
+            threshold = threshold + 0.05
+
+        print((accuracy))
+        print("+====================================================+")
+        print((threshold_graph))
+        print("+====================================================+")
+
+
+    """
+    Function :- generate_report
+    This function is called in the after the predicted scores of every video in the directory has been
+    generated. It is mainly used to generate confusion matrix, classification report and accuracy.
+    Input :
+            probability_scores :- Dictionary with video names as their keys and there predicted 
+                                  probability score as the value of that specific key.
+            threshold :- Real value in between 0 and 1. If probability is more than threshold, then 
+                         we will consider video as fake.
+    Returns :
+            probability_scores :- Dictionary with video names as their keys and there predicted 
+            probability score as the value of that specific key.  
+    """
+    def generate_report(self, probability_scores, threshold):
+        y_real = []
+        y_pred = []
+        y_prob = []
+        for keys in probability_scores.keys():
+            label = int(keys.split("_")[-1])
+            y_real.append(label)
+            if probability_scores[keys] > threshold:
+                y_pred.append(1)
+            else:
+                y_pred.append(0)
+            y_prob.append(probability_scores[keys])
+
+        print(metrics.confusion_matrix(y_real, y_pred))
+        print(metrics.accuracy_score(y_real, y_pred))
+        print(metrics.classification_report(y_real, y_pred))
+        print("Log Loss value is :-", metrics.log_loss(y_real, y_prob))
+
+    def ensemble(self,scores_resnext, scores_efficient):
+        ensembled = {}
+        for keys in scores_resnext.keys():
+            ensembled[keys] = ((0.4 * scores_efficient[keys] + 0.6 * scores_resnext[keys]))
+        return ensembled
+
+    def ensemble3(self,scores_resnext, scores_xception, scores_efficient):
+        ensembled = {}
+        for keys in scores_resnext.keys():
+            ensembled[keys] = ((0.3 * scores_efficient[keys] + 0.2*scores_xception[keys] + 0.5 * scores_resnext[keys]))
+        return ensembled
+
+
+    def dump_json(self,file_name,dictionary):
+        with open(file_name+'.json', 'w') as fp:
+            json.dump(dictionary, fp)
+
+    def read_json(self,file_name):
+        with open(file_name+".json") as f:
+            scores1 = json.load(f)
+        return scores1
+
+class RunClassifier1:
     def __init__(self, video_directory_path, frames_per_video):
         self.utils = Utils(frames_per_video)
-        self.model = self.load_model()
         self.video_directory_path = video_directory_path
         self.frames_per_video = frames_per_video
 
+    def load_model_Xception(self):
+        base_model = Xception(input_shape=(224, 224, 3),
+                              weights='imagenet',
+                              include_top=False,
+                              pooling='avg')
 
-    def load_model(self):
+        for layer in base_model.layers:
+            layer.trainable = True
+        x = base_model.output
+        x = Dense(512)(x)
+        x = Dropout(0.1)(x)
+        x = Activation('relu')(x)
+        x = Dense(64)(x)
+        x = Dropout(0.1)(x)
+        x = Activation('relu')(x)
+        predictions = Dense(1, activation='sigmoid')(x)
+        model = Model(inputs=base_model.input, outputs=predictions)
+        model.compile(loss="binary_crossentropy", optimizer=optimizers.Adam(lr=0.001), metrics=['accuracy'])
+        model.load_weights("Xception_DeepFakeFull.h5")
+        test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
+        return model,test_datagen
+
+    def load_model_efficient(self):
         base_model = EfficientNetB5(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         x = base_model.output
         x = GlobalMaxPooling2D()(x)
@@ -349,15 +451,17 @@ class RunXceptionNet:
         model = Model(inputs=base_model.input, outputs=predictions)
         model.compile(loss="binary_crossentropy", optimizer=optimizers.Adam(lr=0.001), metrics=['accuracy'])
         model.load_weights("EFB5DeepFakes.h5")
-        return model
+        test_datagen = ImageDataGenerator(rescale=1./255)
+        return model,test_datagen
+
     def predict(self):
-        model = self.load_model()
+        model, test_datagen = self.load_model_efficient()
         print("Model has been loaded")
         arr = os.listdir(self.video_directory_path)
         probability_scores = {}
-        test_datagen = ImageDataGenerator(rescale=1. / 255)
+
         for video in arr:
-            start =time.time()
+            start = time.time()
             val_set_dir = self.video_directory_path+"/"+video
             person_count = len(os.listdir(val_set_dir))
 
@@ -377,19 +481,6 @@ class RunXceptionNet:
 
         return probability_scores
 
-    def generate_report(self, probability_scores, threshold):
-        y_real = []
-        y_pred = []
-        for keys in probability_scores.keys():
-            label = int(keys.split("_")[-1])
-            y_real.append(label)
-            if probability_scores[keys] > threshold:
-                y_pred.append(1)
-            else:
-                y_pred.append(0)
-        print(metrics.confusion_matrix(y_real, y_pred))
-        print(metrics.accuracy_score(y_real, y_pred))
-        print(metrics.classification_report(y_real, y_pred))
 
 
 class RunResNext:
@@ -450,54 +541,58 @@ class RunResNext:
             print(video, ":-", probability_scores[video])
         return probability_scores
 
-    """
-    Function :- generate_report
-    This function is called in the after the predicted scores of every video in the directory has been
-    generated. It is mainly used to generate confusion matrix, classification report and accuracy.
-    Input :
-            probability_scores :- Dictionary with video names as their keys and there predicted 
-                                  probability score as the value of that specific key.
-            threshold :- Real value in between 0 and 1. If probability is more than threshold, then 
-                         we will consider video as fake.
-    Returns :
-            probability_scores :- Dictionary with video names as their keys and there predicted 
-            probability score as the value of that specific key.  
-    """
-
-    def generate_report(self, probability_scores, threshold):
-        y_real = []
-        y_pred = []
-        for keys in probability_scores.keys():
-            label = int(keys.split("_")[-1])
-            y_real.append(label)
-            if probability_scores[keys] > threshold:
-                y_pred.append(1)
-            else:
-                y_pred.append(0)
-        print(metrics.confusion_matrix(y_real, y_pred))
-        print(metrics.accuracy_score(y_real, y_pred))
-        print(metrics.classification_report(y_real, y_pred))
-
 
 if __name__ == "__main__":
-
-    #video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/check"
     frames_per_video = 30
-    # face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
-    # face_crop_object.face_crops()
+    Result = results()
 
+    """
+    video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/test_videos"
+    #Result = results()
+    face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
+    face_crop_object.face_crops()
+    """
     video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops"
-    '''
-    resnext = RunResNext(video_directory, frames_per_video)
-    scores = resnext.predict()
-    resnext.generate_report(scores, 0.4)
-    start = time.time()
-    '''
-    
-    '''
-    EfficientNet = RunXceptionNet(video_directory, frames_per_video)
-    scores = EfficientNet.predict()
-    EfficientNet.generate_report(scores, 0.4)
-    '''
-    # print(scores)
-    # shutil.rmtree("/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops")
+
+    # resnext = RunResNext(video_directory, frames_per_video)
+    # scores1 = resnext.predict()
+
+
+    # EfficientNet = RunClassifier1(video_directory, frames_per_video)
+    # scores = EfficientNet.predict()
+
+    scores1 = Result.read_json("ResNext")
+    scores2 = Result.read_json("Xception")
+    scores3 = Result.read_json("EfficientNet")
+
+    print("************************************************")
+    print("ResNext Results")
+    #Result.find_best_threshold(scores1)
+    Result.generate_report(scores1, 0.6)
+    print("************************************************")
+
+    print("************************************************")
+    print("Xception Results")
+    #Result.find_best_threshold(scores2)
+    Result.generate_report(scores2, 0.65)
+    print("************************************************")
+
+    print("************************************************")
+    print("EfficientNet Results")
+    #Result.find_best_threshold(scores3)
+    Result.generate_report(scores3, 0.65)
+    print("************************************************")
+
+    print("************************************************")
+    print("XceptionNet + ResNext Ensemble Results")
+    ensembled = Result.ensemble(scores1, scores2)
+    #Result.find_best_threshold(ensembled)
+    Result.generate_report(ensembled, 0.6)
+    print("************************************************")
+
+    print("************************************************")
+    print("EfficientNet + ResNext Ensemble Results")
+    ensembled = Result.ensemble(scores1, scores3)
+    #Result.find_best_threshold(ensembled)
+    Result.generate_report(ensembled, 0.6)
+    print("************************************************")
