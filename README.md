@@ -22,6 +22,6 @@ https://github.com/kenil-shah/DeepFake_Detection.git
 	3) *EfficientNetB6(With Attention):- Second Model used for ensembling*
 
 4) Download the pretrained weights.
-	1) YOLO Face model [pretrained weights](https://drive.google.com/open?id=1g8hvgQ199VmevOuoTJtaR9yo0CPheqxt) and save it in /model_data/
+	1) YOLO Face model [pretrained weights](https://drive.google.com/file/d/1pK6NsrMfUqZGIwl9Nihs_WRZ7ooRsrj0/view?usp=sharing) and save it in /model_data/
 	2) ResNext:- [pretrained weights](https://drive.google.com/file/d/1_YBJzBd5NOJ_K0-AJMRYUBpXVMfDf4u5/view?usp=sharing) and save it in the root directory 
 	3) EfficientNetB6(With Attention)[pretrained weight](https://drive.google.com/file/d/1I7CJ6avdtQblEBBd9b2qXq_Ec940HA7_/view?usp=sharing) and save it in the root directory
