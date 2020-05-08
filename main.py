@@ -5,15 +5,14 @@ from keras import backend as K
 from keras.preprocessing.image import ImageDataGenerator
 from keras.preprocessing import image
 from keras.models import load_model,Model, Sequential
-from keras.layers import Input, Dropout, Flatten, Dense,Conv2D, MaxPool2D, GlobalMaxPooling2D,Activation
+from keras.layers import Input, Dropout, Flatten, Dense,Conv2D, MaxPool2D, GlobalMaxPooling2D,Activation,GlobalAveragePooling2D
+from keras.layers import BatchNormalization,multiply,Lambda
 from keras import optimizers
 from PIL import Image
 from yolo3.model import yolo_eval, yolo_body, tiny_yolo_body
 from yolo3.utils import letterbox_image
 import os
-import pandas as pd
 from keras.utils import multi_gpu_model
-import shutil
 import time
 from numba import cuda
 from os import listdir
@@ -23,7 +22,7 @@ import torch.nn as nn
 import torchvision.models as models
 from torchvision.transforms import Normalize
 from sklearn import metrics
-from efficientnet.keras import EfficientNetB5
+from efficientnet.keras import EfficientNetB5, EfficientNetB6
 from keras.applications.xception import Xception, preprocess_input
 import json
 
@@ -399,8 +398,7 @@ class results:
             ensembled[keys] = ((0.3 * scores_efficient[keys] + 0.2*scores_xception[keys] + 0.5 * scores_resnext[keys]))
         return ensembled
 
-
-    def dump_json(self,file_name,dictionary):
+    def dump_json(self, file_name, dictionary):
         with open(file_name+'.json', 'w') as fp:
             json.dump(dictionary, fp)
 
@@ -454,8 +452,47 @@ class RunClassifier1:
         test_datagen = ImageDataGenerator(rescale=1./255)
         return model,test_datagen
 
+    def load_efficient_attention(self):
+        print("MODEL LOADING..........")
+        in_lay = Input(shape=(224, 224, 3))
+        base_model = EfficientNetB6(
+            input_shape=(224, 224, 3),
+            weights='imagenet',
+            include_top=False
+        )
+
+        pt_depth = base_model.get_output_shape_at(0)[-1]
+        pt_features = base_model(in_lay)
+        bn_features = BatchNormalization()(pt_features)
+        # here we do an attention mechanism to turn pixels in the GAP on an off
+        attn_layer = Conv2D(64, kernel_size=(1, 1), padding='same', activation='relu')(Dropout(0.5)(bn_features))
+        attn_layer = Conv2D(16, kernel_size=(1, 1), padding='same', activation='relu')(attn_layer)
+        attn_layer = Conv2D(8, kernel_size=(1, 1), padding='same', activation='relu')(attn_layer)
+        attn_layer = Conv2D(1, kernel_size=(1, 1), padding='valid', activation='sigmoid')(attn_layer)
+        # fan it out to all of the channels
+        up_c2_w = np.ones((1, 1, 1, pt_depth))
+        up_c2 = Conv2D(pt_depth, kernel_size=(1, 1), padding='same',
+                       activation='linear', use_bias=False, weights=[up_c2_w])
+        up_c2.trainable = False
+        attn_layer = up_c2(attn_layer)
+
+        mask_features = multiply([attn_layer, bn_features])
+        gap_features = GlobalAveragePooling2D()(mask_features)
+        gap_mask = GlobalAveragePooling2D()(attn_layer)
+        # to account for missing values from the attention model
+        gap = Lambda(lambda x: x[0] / x[1], name='RescaleGAP')([gap_features, gap_mask])
+        gap_dr = Dropout(0.25)(gap)
+        dr_steps = Dropout(0.25)(Dense(128, activation='relu')(gap_dr))
+        out_layer = Dense(1, activation='sigmoid')(dr_steps)
+        model = Model(inputs=[in_lay], outputs=[out_layer])
+        model.compile(loss="binary_crossentropy", optimizer=optimizers.Adam(lr=0.001), metrics=['accuracy'])
+        model.load_weights("EFB6withAttentionDeepFakes.h5")
+        model.summary()
+        test_datagen = ImageDataGenerator(rescale=1./255)
+        return model,test_datagen
+
     def predict(self):
-        model, test_datagen = self.load_model_efficient()
+        model, test_datagen = self.load_efficient_attention()
         print("Model has been loaded")
         arr = os.listdir(self.video_directory_path)
         probability_scores = {}
@@ -546,53 +583,36 @@ if __name__ == "__main__":
     frames_per_video = 30
     Result = results()
 
-    """
+    
     video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/test_videos"
     #Result = results()
     face_crop_object = GenerateFaceCrops(video_directory, frames_per_video)
     face_crop_object.face_crops()
-    """
-    video_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops"
+    
+    image_directory = "/media/kenil/Kenil/Users/Kenil/Downloads/Final_Project/Main/FaceCrops"
 
-    # resnext = RunResNext(video_directory, frames_per_video)
-    # scores1 = resnext.predict()
+    resnext = RunResNext(image_directory , frames_per_video)
+    scores1 = resnext.predict()
 
-
-    # EfficientNet = RunClassifier1(video_directory, frames_per_video)
-    # scores = EfficientNet.predict()
-
-    scores1 = Result.read_json("ResNext")
-    scores2 = Result.read_json("Xception")
-    scores3 = Result.read_json("EfficientNet")
+    EfficientNet = RunClassifier1(image_directory frames_per_video)
+    EfficientNet.load_efficient_attention()
+    scores2 = EfficientNet.predict()
 
     print("************************************************")
     print("ResNext Results")
-    #Result.find_best_threshold(scores1)
+    # Result.find_best_threshold(scores1)
     Result.generate_report(scores1, 0.6)
     print("************************************************")
 
     print("************************************************")
-    print("Xception Results")
-    #Result.find_best_threshold(scores2)
-    Result.generate_report(scores2, 0.65)
+    print("EfficientNet Attention Results")
+    Result.find_best_threshold(scores4  )
+    Result.generate_report(scores4, 0.5)
     print("************************************************")
 
     print("************************************************")
-    print("EfficientNet Results")
-    #Result.find_best_threshold(scores3)
-    Result.generate_report(scores3, 0.65)
-    print("************************************************")
-
-    print("************************************************")
-    print("XceptionNet + ResNext Ensemble Results")
-    ensembled = Result.ensemble(scores1, scores2)
-    #Result.find_best_threshold(ensembled)
-    Result.generate_report(ensembled, 0.6)
-    print("************************************************")
-
-    print("************************************************")
-    print("EfficientNet + ResNext Ensemble Results")
-    ensembled = Result.ensemble(scores1, scores3)
-    #Result.find_best_threshold(ensembled)
-    Result.generate_report(ensembled, 0.6)
+    print("EfficientNet Attention + ResNext Ensemble Results")
+    ensembled = Result.ensemble(scores4, scores1)
+    Result.find_best_threshold(ensembled)
+    Result.generate_report(ensembled, 0.5)
     print("************************************************")
